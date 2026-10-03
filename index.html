@@ -1,0 +1,651 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Wither Storm</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* Layout: full-bleed WebGL storm sky, one HUD card top-left, one control rail pinned to the bottom */
+:root {
+  --bg: #120d18;
+  --panel: rgba(20, 14, 28, 0.78);
+  --ink: #efe6f7;
+  --muted: #a596b5;
+  --violet: #b46cff;
+  --amber: #e09a4e;
+  --line: rgba(180, 108, 255, 0.35);
+  --on-violet: #160d20;
+  --display: 'Silkscreen', 'Courier New', monospace;
+  --body: 'IBM Plex Mono', ui-monospace, Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+html, body { height: 100%; margin: 0; overflow: hidden; background: var(--bg); color: var(--ink); font-family: var(--body); }
+#scene { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+#scene:active { cursor: grabbing; }
+.hud {
+  position: fixed; top: calc(16px + env(safe-area-inset-top, 0px)); left: 16px;
+  max-width: min(360px, calc(100% - 32px)); box-sizing: border-box;
+  padding: 16px 18px; background: var(--panel); border: 1px solid var(--line);
+  backdrop-filter: blur(6px); display: grid; gap: 10px;
+}
+.eyebrow { margin: 0; font: 500 11px/1 var(--body); letter-spacing: 0.14em; text-transform: uppercase; color: var(--amber); }
+h1 { margin: 0; font: 700 28px/1.05 var(--display); letter-spacing: 0.02em; text-wrap: balance; color: var(--ink); text-shadow: 0 0 18px rgba(180, 108, 255, 0.55); }
+.lede { margin: 0; font-size: 13px; line-height: 1.5; color: var(--muted); }
+.stats { display: flex; flex-wrap: wrap; gap: 18px; margin: 0; }
+.stats dt { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+.stats dd { margin: 4px 0 0; font: 700 18px/1 var(--display); font-variant-numeric: tabular-nums; color: var(--violet); }
+.controls {
+  position: fixed; left: 16px; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;
+}
+.controls button {
+  font: 500 12px/1 var(--body); letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--ink); background: var(--panel); border: 1px solid var(--line);
+  padding: 11px 14px; cursor: pointer; backdrop-filter: blur(6px);
+}
+.controls button:hover { border-color: var(--violet); }
+.controls button[aria-pressed="true"] { background: var(--violet); color: var(--on-violet); border-color: var(--violet); }
+.controls button:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+.seg { display: flex; }
+.seg button + button { border-left-width: 0; }
+.hint { position: fixed; right: 16px; top: calc(16px + env(safe-area-inset-top, 0px)); margin: 0; font-size: 11px; letter-spacing: 0.06em; color: var(--muted); }
+@media (max-width: 640px) {
+  .lede, .hint { display: none; }
+  h1 { font-size: 22px; }
+  .controls button { padding: 10px 11px; font-size: 11px; }
+}
+</style>
+</head>
+<body>
+
+<canvas id="scene" aria-label="3D model of the Wither Storm absorbing blocks with its tractor beam"></canvas>
+
+<section class="hud">
+  <p class="eyebrow">Minecraft: Story Mode</p>
+  <h1>The Wither Storm</h1>
+  <p class="lede">A three-headed Wither fused to a Command Block. It pulls the world apart with a tractor beam and grows with every block it swallows.</p>
+  <dl class="stats">
+    <div><dt>Stage</dt><dd id="stageOut">2</dd></div>
+    <div><dt>Heads</dt><dd>3</dd></div>
+    <div><dt>Blocks absorbed</dt><dd id="absorbedOut">0</dd></div>
+  </dl>
+</section>
+
+<p class="hint">Drag to orbit · Scroll or pinch to zoom</p>
+
+<nav class="controls" aria-label="Scene controls">
+  <div class="seg" role="group" aria-label="Growth stage">
+    <button type="button" id="stage1" data-stage="0" aria-pressed="false">Stage 1</button>
+    <button type="button" id="stage2" data-stage="1" aria-pressed="true">Stage 2</button>
+    <button type="button" id="stage3" data-stage="2" aria-pressed="false">Stage 3</button>
+  </div>
+  <button type="button" id="beamBtn" aria-pressed="true">Tractor beam</button>
+  <button type="button" id="roarBtn">Roar</button>
+  <button type="button" id="spinBtn" aria-pressed="true">Auto-orbit</button>
+</nav>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(() => {
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // ---------- renderer / scene ----------
+  const canvas = document.getElementById('scene');
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  const scene = new THREE.Scene();
+  const SKY = new THREE.Color(0x1d1626);
+  const FLASH_SKY = new THREE.Color(0x54407a);
+  scene.background = SKY.clone();
+  scene.fog = new THREE.Fog(0x1d1626, 80, 250);
+  const camera = new THREE.PerspectiveCamera(55, 1, 0.5, 800);
+
+  // ---------- helpers ----------
+  let seed = 1337;
+  const rnd = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
+  function hash(x, y, z) {
+    let h = Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(z | 0, 1274126177);
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+  }
+  function pixTex(draw) {
+    const c = document.createElement('canvas');
+    c.width = c.height = 16;
+    draw(c.getContext('2d'));
+    const t = new THREE.CanvasTexture(c);
+    t.magFilter = THREE.NearestFilter;
+    t.minFilter = THREE.NearestFilter;
+    t.generateMipmaps = false;
+    return t;
+  }
+  function speckle(g, cols) {
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      g.fillStyle = cols[Math.floor(rnd() * cols.length)];
+      g.fillRect(x, y, 1, 1);
+    }
+  }
+  const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+  const dummy = new THREE.Object3D();
+  const col = new THREE.Color();
+
+  // ---------- 16x16 block textures ----------
+  const fleshTex = pixTex(g => {
+    speckle(g, ['#2b2231', '#352a3d', '#221a28', '#3f3249', '#2e2535', '#1a141f']);
+    g.fillStyle = '#5c3a85';
+    for (let i = 0; i < 7; i++) g.fillRect(rnd() * 16 | 0, rnd() * 16 | 0, 1, 1);
+  });
+  const greyTex = pixTex(g => speckle(g, ['#ffffff', '#e6e6e6', '#cfcfcf', '#bdbdbd', '#f2f2f2']));
+  const grassTopTex = pixTex(g => speckle(g, ['#5d9b3a', '#6aab43', '#4f8a31', '#78b84e', '#588f37']));
+  const dirtTex = pixTex(g => speckle(g, ['#7a5434', '#6b482b', '#86603c', '#5e3f26', '#8d6a45']));
+  const grassSideTex = pixTex(g => {
+    speckle(g, ['#7a5434', '#6b482b', '#86603c', '#5e3f26']);
+    for (let x = 0; x < 16; x++) {
+      const d = 3 + (rnd() * 3 | 0);
+      for (let y = 0; y < d; y++) { g.fillStyle = ['#5d9b3a', '#6aab43', '#4f8a31'][rnd() * 3 | 0]; g.fillRect(x, y, 1, 1); }
+    }
+  });
+  const cmdTex = pixTex(g => {
+    speckle(g, ['#c9824a', '#b8733e', '#d6935a', '#a8673a']);
+    g.fillStyle = '#5a4136';
+    g.fillRect(0, 0, 16, 1); g.fillRect(0, 15, 16, 1); g.fillRect(0, 0, 1, 16); g.fillRect(15, 0, 1, 16);
+    g.fillStyle = '#9fa3a6'; g.fillRect(4, 4, 8, 8);
+    g.fillStyle = '#4b4f52'; g.fillRect(5, 5, 6, 6);
+    g.fillStyle = '#e8e8e8';
+    g.fillRect(6, 6, 1, 1); g.fillRect(7, 7, 1, 1); g.fillRect(6, 8, 1, 1); g.fillRect(8, 9, 2, 1);
+  });
+
+  // ---------- lighting ----------
+  const hemi = new THREE.HemisphereLight(0x8f7aa8, 0x2a2018, 0.8);
+  scene.add(hemi);
+  const sun = new THREE.DirectionalLight(0xd9c8ff, 0.7);
+  sun.position.set(60, 120, 40);
+  scene.add(sun);
+  scene.add(new THREE.AmbientLight(0x3a2c4a, 0.45));
+
+  // ---------- terrain ----------
+  const GN = 64;
+  const CRATER = new THREE.Vector2(0, 24);
+  function groundH(x, z) {
+    let h = Math.floor(2.2 * Math.sin(x * 0.11) + 1.8 * Math.cos(z * 0.13) + 1.4 * Math.sin((x + z) * 0.07) + hash(x, 0, z) * 1.2);
+    const d = Math.hypot(x - CRATER.x, z - CRATER.y);
+    if (d < 10) h -= Math.round((10 - d) * 0.6);
+    return h;
+  }
+  const topCells = [], dirtCells = [];
+  for (let x = -GN; x < GN; x++) for (let z = -GN; z < GN; z++) {
+    const h = groundH(x, z);
+    const minN = Math.min(groundH(x + 1, z), groundH(x - 1, z), groundH(x, z + 1), groundH(x, z - 1));
+    topCells.push(x, h, z);
+    for (let y = Math.min(h - 1, minN); y < h; y++) dirtCells.push(x, y, z);
+  }
+  const grassSideMat = new THREE.MeshLambertMaterial({ map: grassSideTex });
+  const grassMats = [grassSideMat, grassSideMat, new THREE.MeshLambertMaterial({ map: grassTopTex }), new THREE.MeshLambertMaterial({ map: dirtTex }), grassSideMat, grassSideMat];
+  function cellMesh(cells, mat) {
+    const n = cells.length / 3;
+    const m = new THREE.InstancedMesh(boxGeo, mat, n);
+    for (let i = 0; i < n; i++) {
+      dummy.position.set(cells[i * 3], cells[i * 3 + 1], cells[i * 3 + 2]);
+      dummy.rotation.set(0, 0, 0); dummy.scale.setScalar(1); dummy.updateMatrix();
+      m.setMatrixAt(i, dummy.matrix);
+    }
+    return m;
+  }
+  scene.add(cellMesh(topCells, grassMats));
+  scene.add(cellMesh(dirtCells, new THREE.MeshLambertMaterial({ map: dirtTex })));
+
+  // tinted blocks: one grey-noise texture, coloured per instance
+  function tintedMesh(items) {
+    const m = new THREE.InstancedMesh(boxGeo, new THREE.MeshLambertMaterial({ map: greyTex }), items.length);
+    items.forEach((it, i) => {
+      dummy.position.copy(it.p); dummy.rotation.set(0, 0, 0); dummy.scale.setScalar(it.s || 1); dummy.updateMatrix();
+      m.setMatrixAt(i, dummy.matrix);
+      m.setColorAt(i, col.set(it.c));
+    });
+    m.instanceColor.needsUpdate = true;
+    return m;
+  }
+
+  // trees
+  const treeBlocks = [];
+  for (let i = 0; i < 26; i++) {
+    const tx = Math.round((rnd() * 2 - 1) * (GN - 6)), tz = Math.round((rnd() * 2 - 1) * (GN - 6));
+    if (Math.hypot(tx - CRATER.x, tz - CRATER.y) < 16) continue;
+    const base = groundH(tx, tz) + 1, th = 4 + (rnd() * 2 | 0);
+    for (let y = 0; y < th; y++) treeBlocks.push({ p: new THREE.Vector3(tx, base + y, tz), c: '#6b5233' });
+    for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) for (let dy = 0; dy < 2; dy++) {
+      if (Math.abs(dx) === 2 && Math.abs(dz) === 2) continue;
+      if (dx === 0 && dz === 0) continue;
+      treeBlocks.push({ p: new THREE.Vector3(tx + dx, base + th - 2 + dy, tz + dz), c: rnd() > 0.5 ? '#3f6e2a' : '#4a7d31' });
+    }
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++)
+      treeBlocks.push({ p: new THREE.Vector3(tx + dx, base + th, tz + dz), c: '#3f6e2a' });
+  }
+  scene.add(tintedMesh(treeBlocks));
+
+  // ---------- storm clouds ----------
+  const clouds = new THREE.Group();
+  const cloudMat = new THREE.MeshLambertMaterial({ color: 0x2a2233, transparent: true, opacity: 0.88 });
+  for (let i = 0; i < 46; i++) {
+    const a = rnd() * Math.PI * 2, r = 40 + rnd() * 130;
+    const c = new THREE.Mesh(boxGeo, cloudMat);
+    c.scale.set(18 + rnd() * 26, 3 + rnd() * 4, 10 + rnd() * 18);
+    c.position.set(Math.cos(a) * r, 86 + rnd() * 14, Math.sin(a) * r);
+    c.rotation.y = a;
+    clouds.add(c);
+  }
+  scene.add(clouds);
+
+  // ---------- the Wither Storm ----------
+  const STORM_POS = new THREE.Vector3(0, 50, -6);
+  const storm = new THREE.Group();
+  storm.position.copy(STORM_POS);
+  scene.add(storm);
+  const fleshMat = new THREE.MeshLambertMaterial({ map: fleshTex });
+  function fleshColor(v) { return col.setRGB(v, v * 0.94, v * 1.08); }
+
+  // body: a lumpy hollow ellipsoid of blocks with a cavity for the Command Block
+  const A = 8, B = 6, C = 6;
+  function inside(x, y, z) {
+    if (z >= C - 3 && Math.abs(x) <= 1 && Math.abs(y) <= 1) return false;
+    const n = 1 + 0.4 * (hash(x, y, z) - 0.5) + 0.22 * Math.sin(x * 0.9 + y * 0.4) * Math.cos(z * 0.8 - y * 0.3);
+    return (x * x) / (A * A) + (y * y) / (B * B) + (z * z) / (C * C) < n;
+  }
+  const bodyCells = new Map();
+  for (let x = -A - 3; x <= A + 3; x++) for (let y = -B - 3; y <= B + 3; y++) for (let z = -C - 3; z <= C + 3; z++) {
+    if (!inside(x, y, z)) continue;
+    if (inside(x + 1, y, z) && inside(x - 1, y, z) && inside(x, y + 1, z) && inside(x, y - 1, z) && inside(x, y, z + 1) && inside(x, y, z - 1)) continue;
+    bodyCells.set(x + ',' + y + ',' + z, [x, y, z]);
+    if (hash(x + 7, y - 3, z + 11) > 0.88) {
+      const nx = x / (A * A), ny = y / (B * B), nz = z / (C * C), l = Math.hypot(nx, ny, nz) || 1;
+      const px = Math.round(x + nx / l * 1.4), py = Math.round(y + ny / l * 1.4), pz = Math.round(z + nz / l * 1.4);
+      if (!(pz >= C - 3 && Math.abs(px) <= 1 && Math.abs(py) <= 1)) bodyCells.set(px + ',' + py + ',' + pz, [px, py, pz]);
+    }
+  }
+  const bodyList = [...bodyCells.values()];
+  const bodyMesh = new THREE.InstancedMesh(boxGeo, fleshMat, bodyList.length);
+  bodyList.forEach(([x, y, z], i) => {
+    dummy.position.set(x, y, z); dummy.rotation.set(0, 0, 0); dummy.scale.setScalar(1); dummy.updateMatrix();
+    bodyMesh.setMatrixAt(i, dummy.matrix);
+    bodyMesh.setColorAt(i, fleshColor(0.7 + hash(x, y, z + 99) * 0.5));
+  });
+  bodyMesh.instanceColor.needsUpdate = true;
+  storm.add(bodyMesh);
+
+  const cmdBlock = new THREE.Mesh(new THREE.BoxGeometry(2.6, 2.6, 2.6),
+    new THREE.MeshLambertMaterial({ map: cmdTex, emissive: 0xffffff, emissiveMap: cmdTex, emissiveIntensity: 0.45 }));
+  cmdBlock.position.set(0, 0, C - 2.2);
+  storm.add(cmdBlock);
+  const cmdGlow = new THREE.PointLight(0xe09a4e, 0.9, 22);
+  cmdGlow.position.set(0, 0, C + 1);
+  storm.add(cmdGlow);
+
+  // heads + necks
+  const eyeMat = new THREE.MeshBasicMaterial({ color: 0xe7c6ff });
+  const mouthMat = new THREE.MeshBasicMaterial({ color: 0x0b0610 });
+  const headDefs = [
+    { base: new THREE.Vector3(0, B - 1, 1), pos: new THREE.Vector3(0, B + 8, 3), s: 7, center: true },
+    { base: new THREE.Vector3(-A + 2, B - 2, 0), pos: new THREE.Vector3(-A - 4, B + 4, 2), s: 5 },
+    { base: new THREE.Vector3(A - 2, B - 2, 0), pos: new THREE.Vector3(A + 4, B + 4, 2), s: 5 },
+  ];
+  const neckCells = [];
+  const heads = [];
+  let mouthAnchor = null, headLight = null;
+  headDefs.forEach((d, hi) => {
+    const end = d.pos.clone().add(new THREE.Vector3(0, -d.s / 2, -0.5));
+    const ctrl = d.base.clone().lerp(end, 0.5).add(new THREE.Vector3(0, 2.5, -1.5));
+    const steps = Math.ceil(d.base.distanceTo(end) / 0.7);
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps, u = 1 - t;
+      const p = new THREE.Vector3(
+        u * u * d.base.x + 2 * u * t * ctrl.x + t * t * end.x,
+        u * u * d.base.y + 2 * u * t * ctrl.y + t * t * end.y,
+        u * u * d.base.z + 2 * u * t * ctrl.z + t * t * end.z);
+      for (const [ox, oz] of [[-0.5, -0.5], [0.5, -0.5], [-0.5, 0.5], [0.5, 0.5]])
+        neckCells.push([p.x + ox + (hash(i, hi, ox * 4) - 0.5) * 0.4, p.y, p.z + oz]);
+    }
+
+    const head = new THREE.Group();
+    head.position.copy(d.pos);
+    const s = d.s, half = (s - 1) / 2, cells = [];
+    for (let x = 0; x < s; x++) for (let y = 0; y < s; y++) for (let z = 0; z < s; z++) {
+      if (x > 0 && x < s - 1 && y > 0 && y < s - 1 && z > 0 && z < s - 1) continue;
+      cells.push([x - half, y - half, z - half]);
+      if (y === s - 1 && hash(x, hi, z) > 0.75) cells.push([x - half, y - half + 1, z - half]);
+      if (z === 0 && hash(x + 5, y, hi) > 0.8) cells.push([x - half, y - half, z - half - 1]);
+    }
+    const hm = new THREE.InstancedMesh(boxGeo, fleshMat, cells.length);
+    cells.forEach(([x, y, z], i) => {
+      dummy.position.set(x, y, z); dummy.rotation.set(0, 0, 0); dummy.scale.setScalar(1); dummy.updateMatrix();
+      hm.setMatrixAt(i, dummy.matrix);
+      hm.setColorAt(i, fleshColor(0.75 + hash(x * 3, y * 5, z * 7 + hi) * 0.45));
+    });
+    hm.instanceColor.needsUpdate = true;
+    head.add(hm);
+    const front = s / 2 + 0.06;
+    for (const sx of [-1, 1]) {
+      const eye = new THREE.Mesh(new THREE.BoxGeometry(s * 0.24, s * 0.13, 0.3), eyeMat);
+      eye.position.set(sx * s * 0.22, s * 0.12, front);
+      head.add(eye);
+    }
+    const mouth = new THREE.Mesh(new THREE.BoxGeometry(s * 0.56, s * 0.15, 0.3), mouthMat);
+    mouth.position.set(0, -s * 0.2, front);
+    head.add(mouth);
+    if (d.center) {
+      mouthAnchor = new THREE.Object3D();
+      mouthAnchor.position.set(0, -s * 0.2, front + 0.4);
+      head.add(mouthAnchor);
+      headLight = new THREE.PointLight(0xb46cff, 1.4, 50);
+      headLight.position.set(0, 0, front + 2);
+      head.add(headLight);
+    }
+    storm.add(head);
+    heads.push({ group: head, phase: hi * 2.1, center: !!d.center });
+  });
+  const neckMesh = new THREE.InstancedMesh(boxGeo, fleshMat, neckCells.length);
+  neckCells.forEach(([x, y, z], i) => {
+    dummy.position.set(x, y, z); dummy.rotation.set(0, 0, 0); dummy.scale.setScalar(1.05); dummy.updateMatrix();
+    neckMesh.setMatrixAt(i, dummy.matrix);
+    neckMesh.setColorAt(i, fleshColor(0.65 + hash(i, 3, 9) * 0.4));
+  });
+  neckMesh.instanceColor.needsUpdate = true;
+  storm.add(neckMesh);
+
+  // tentacles: chains of tumbling blocks
+  const MAX_TENT = 14, SEG = 24;
+  const tentacles = [];
+  for (let i = 0; i < MAX_TENT; i++) {
+    const a = (i / MAX_TENT) * Math.PI * 2 + rnd() * 0.3;
+    tentacles.push({
+      root: new THREE.Vector3(Math.cos(a) * A * 0.7, -B * 0.4 + rnd() * 4 - 2, Math.sin(a) * C * 0.7),
+      out: new THREE.Vector3(Math.cos(a), -0.45 - rnd() * 0.4, Math.sin(a)).normalize(),
+      ph: rnd() * Math.PI * 2,
+      len: 0.85 + rnd() * 0.4,
+    });
+  }
+  // fill order is tentacle-major so lowering .count drops whole tentacles
+  const ORDER = [0, 7, 3, 10, 5, 12, 1, 8, 4, 11, 2, 9, 6, 13];
+  const tentMesh = new THREE.InstancedMesh(boxGeo, fleshMat, MAX_TENT * SEG);
+  tentMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  for (let i = 0; i < MAX_TENT * SEG; i++) tentMesh.setColorAt(i, fleshColor(0.6 + hash(i, 1, 2) * 0.45));
+  tentMesh.instanceColor.needsUpdate = true;
+  storm.add(tentMesh);
+
+  // debris orbiting the storm
+  const PALETTE = ['#5d9b3a', '#7a5434', '#8a8a8a', '#6b5233', '#3f6e2a', '#9c9c9c', '#b08a5a', '#6e6e6e'];
+  const ORBIT_N = 170;
+  const orbiters = [];
+  const orbitMesh = new THREE.InstancedMesh(boxGeo, new THREE.MeshLambertMaterial({ map: greyTex }), ORBIT_N);
+  orbitMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  for (let i = 0; i < ORBIT_N; i++) {
+    orbiters.push({ r: 15 + rnd() * 20, a: rnd() * Math.PI * 2, y: -9 + rnd() * 20, sp: 0.15 + rnd() * 0.35, s: 0.5 + rnd() * 0.9, spin: rnd() * 3 });
+    orbitMesh.setColorAt(i, col.set(PALETTE[rnd() * PALETTE.length | 0]));
+  }
+  orbitMesh.instanceColor.needsUpdate = true;
+  storm.add(orbitMesh);
+
+  // ---------- tractor beam ----------
+  const beamVert = 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }';
+  const beamFrag = [
+    'uniform float time; uniform float opacity; uniform vec3 color; varying vec2 vUv;',
+    'void main(){',
+    '  float s = 0.5 + 0.5 * sin(vUv.y * 40.0 + time * 8.0);',
+    '  float sw = 0.5 + 0.5 * sin(vUv.x * 37.7 + time * 2.0 + vUv.y * 10.0);',
+    '  float a = (0.08 + 0.24 * s * sw) * smoothstep(0.0, 0.12, vUv.y) * smoothstep(1.0, 0.86, vUv.y);',
+    '  gl_FragColor = vec4(color * (0.8 + 0.6 * s), a * opacity);',
+    '}'].join('\n');
+  function beamMaterial(hex, op) {
+    return new THREE.ShaderMaterial({
+      uniforms: { time: { value: 0 }, opacity: { value: op }, color: { value: new THREE.Color(hex) } },
+      vertexShader: beamVert, fragmentShader: beamFrag,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    });
+  }
+  const beamGeo = new THREE.CylinderGeometry(0.22, 1, 1, 32, 1, true);
+  beamGeo.translate(0, -0.5, 0);
+  const beamOuter = new THREE.Mesh(beamGeo, beamMaterial(0xb46cff, 1));
+  const beamInner = new THREE.Mesh(beamGeo, beamMaterial(0xf0dcff, 1.2));
+  scene.add(beamOuter, beamInner);
+  const beamTarget = new THREE.Vector3(CRATER.x, groundH(CRATER.x, CRATER.y) + 0.5, CRATER.y);
+  const groundGlow = new THREE.PointLight(0xb46cff, 1.6, 30);
+  groundGlow.position.copy(beamTarget).add(new THREE.Vector3(0, 2, 0));
+  scene.add(groundGlow);
+
+  const BEAM_N = 80;
+  const lifted = [];
+  const liftMesh = new THREE.InstancedMesh(boxGeo, new THREE.MeshLambertMaterial({ map: greyTex }), BEAM_N);
+  liftMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  for (let i = 0; i < BEAM_N; i++) {
+    lifted.push({ t: rnd(), a: rnd() * Math.PI * 2, r: 0.2 + rnd() * 0.8, sp: 0.08 + rnd() * 0.1, spin: rnd() * 4 });
+    liftMesh.setColorAt(i, col.set(PALETTE[rnd() * PALETTE.length | 0]));
+  }
+  liftMesh.instanceColor.needsUpdate = true;
+  scene.add(liftMesh);
+
+  // ---------- lightning ----------
+  const BOLT_PTS = 14;
+  const boltGeo = new THREE.BufferGeometry();
+  boltGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(BOLT_PTS * 3), 3));
+  const boltMat = new THREE.LineBasicMaterial({ color: 0xeedcff, transparent: true, opacity: 0 });
+  const bolt = new THREE.Line(boltGeo, boltMat);
+  bolt.frustumCulled = false;
+  scene.add(bolt);
+  let nextFlash = 3, flashT = 0;
+  function strike() {
+    const a = rnd() * Math.PI * 2, r = 30 + rnd() * 70;
+    let x = Math.cos(a) * r, z = Math.sin(a) * r;
+    const pos = boltGeo.attributes.position.array;
+    const gy = groundH(Math.round(x), Math.round(z));
+    for (let i = 0; i < BOLT_PTS; i++) {
+      const t = i / (BOLT_PTS - 1);
+      pos[i * 3] = x; pos[i * 3 + 1] = 92 - t * (92 - gy); pos[i * 3 + 2] = z;
+      x += (rnd() - 0.5) * 6; z += (rnd() - 0.5) * 6;
+    }
+    boltGeo.attributes.position.needsUpdate = true;
+    flashT = 0.4;
+  }
+
+  // ---------- state + UI ----------
+  const STAGES = [{ scale: 0.75, tent: 4 }, { scale: 1.1, tent: 9 }, { scale: 1.5, tent: 14 }];
+  const state = { stage: 1, beam: true, spin: !reduceMotion, roar: 0, absorbed: 0, scale: STAGES[1].scale };
+  const stageOut = document.getElementById('stageOut');
+  const absorbedOut = document.getElementById('absorbedOut');
+  const stageBtns = [...document.querySelectorAll('[data-stage]')];
+  function setStage(i) {
+    state.stage = i;
+    stageBtns.forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.stage === i)));
+    stageOut.textContent = String(i + 1);
+  }
+  stageBtns.forEach(b => b.addEventListener('click', () => setStage(+b.dataset.stage)));
+  const beamBtn = document.getElementById('beamBtn');
+  beamBtn.addEventListener('click', () => { state.beam = !state.beam; beamBtn.setAttribute('aria-pressed', String(state.beam)); });
+  document.getElementById('roarBtn').addEventListener('click', () => { state.roar = 2.2; });
+  const spinBtn = document.getElementById('spinBtn');
+  spinBtn.setAttribute('aria-pressed', String(state.spin));
+  spinBtn.addEventListener('click', () => { state.spin = !state.spin; spinBtn.setAttribute('aria-pressed', String(state.spin)); });
+
+  // ---------- orbit camera ----------
+  const orbit = { theta: 0.55, phi: 1.3, r: 95, target: new THREE.Vector3(0, 40, 0) };
+  const pointers = new Map();
+  let pinchDist = 0, lastInteract = -10;
+  canvas.addEventListener('pointerdown', e => {
+    canvas.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size === 2) { const [p, q] = [...pointers.values()]; pinchDist = Math.hypot(p.x - q.x, p.y - q.y); }
+  });
+  canvas.addEventListener('pointermove', e => {
+    const prev = pointers.get(e.pointerId);
+    if (!prev) return;
+    const cur = { x: e.clientX, y: e.clientY };
+    pointers.set(e.pointerId, cur);
+    lastInteract = clock.elapsedTime;
+    if (pointers.size === 1) {
+      orbit.theta -= (cur.x - prev.x) * 0.006;
+      orbit.phi = Math.min(1.55, Math.max(0.3, orbit.phi - (cur.y - prev.y) * 0.005));
+    } else if (pointers.size === 2) {
+      const [p, q] = [...pointers.values()];
+      const d = Math.hypot(p.x - q.x, p.y - q.y);
+      if (pinchDist > 0) orbit.r = Math.min(230, Math.max(45, orbit.r * pinchDist / d));
+      pinchDist = d;
+    }
+  });
+  const release = e => { pointers.delete(e.pointerId); pinchDist = 0; };
+  canvas.addEventListener('pointerup', release);
+  canvas.addEventListener('pointercancel', release);
+  canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    orbit.r = Math.min(230, Math.max(45, orbit.r * (1 + e.deltaY * 0.001)));
+    lastInteract = clock.elapsedTime;
+  }, { passive: false });
+
+  function resize() {
+    const w = window.innerWidth, h = window.innerHeight;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---------- animation ----------
+  const clock = new THREE.Clock();
+  const mouthWorld = new THREE.Vector3(), tmp = new THREE.Vector3(), dir = new THREE.Vector3();
+  const DOWN = new THREE.Vector3(0, -1, 0);
+  let beamFade = 1;
+
+  function frame() {
+    const dt = Math.min(clock.getDelta(), 0.05);
+    const t = clock.elapsedTime;
+    const roarK = state.roar > 0 ? Math.sin(Math.min(1, state.roar / 2.2) * Math.PI) : 0;
+    state.roar = Math.max(0, state.roar - dt);
+
+    // growth + drift
+    const cfg = STAGES[state.stage];
+    state.scale += (cfg.scale - state.scale) * Math.min(1, dt * 1.5);
+    storm.scale.setScalar(state.scale);
+    storm.position.set(STORM_POS.x, STORM_POS.y + Math.sin(t * 0.6) * 1.2 + (state.scale - 1.1) * 14, STORM_POS.z);
+    storm.rotation.y = Math.sin(t * 0.15) * 0.22;
+    storm.rotation.z = Math.sin(t * 0.33) * 0.03;
+    if (roarK > 0 && !reduceMotion) storm.position.x += Math.sin(t * 60) * 0.4 * roarK;
+    cmdBlock.material.emissiveIntensity = 0.4 + 0.15 * Math.sin(t * 3);
+
+    // heads
+    heads.forEach(h => {
+      const g = h.group;
+      if (h.center) {
+        g.rotation.x = 0.32 + Math.sin(t * 0.7) * 0.05 - roarK * 0.7;
+        g.rotation.y = Math.sin(t * 0.4) * 0.12;
+      } else {
+        g.rotation.x = 0.1 + Math.sin(t * 0.9 + h.phase) * 0.12 - roarK * 0.6;
+        g.rotation.y = Math.sin(t * 0.6 + h.phase) * 0.45;
+      }
+      g.rotation.z = Math.sin(t * 0.5 + h.phase) * 0.08 + (roarK ? Math.sin(t * 40 + h.phase) * 0.06 * roarK : 0);
+    });
+    eyeMat.color.setRGB(0.9 + roarK * 0.1, 0.78 + roarK * 0.22, 1);
+    headLight.intensity = 1.4 + roarK * 3;
+
+    // tentacles
+    tentMesh.count = cfg.tent * SEG;
+    for (let k = 0; k < cfg.tent; k++) {
+      const T = tentacles[ORDER[k]];
+      const wild = 1 + roarK * 1.5;
+      for (let j = 0; j < SEG; j++) {
+        const f = j / SEG, d = j * 1.05 * T.len;
+        dummy.position.copy(T.root).addScaledVector(T.out, d);
+        dummy.position.y -= j * j * 0.03;
+        dummy.position.x += Math.sin(t * 1.1 * wild + j * 0.32 + T.ph) * j * 0.14;
+        dummy.position.z += Math.cos(t * 0.85 * wild + j * 0.27 + T.ph) * j * 0.14;
+        dummy.position.y += Math.sin(t * 1.4 + j * 0.25 + T.ph) * j * 0.06;
+        dummy.rotation.set(j * 0.4 + t * 0.25, j * 0.7 + T.ph, j * 0.3);
+        dummy.scale.setScalar(1.8 * (1 - f * 0.72));
+        dummy.updateMatrix();
+        tentMesh.setMatrixAt(k * SEG + j, dummy.matrix);
+      }
+    }
+    tentMesh.instanceMatrix.needsUpdate = true;
+
+    // orbiting debris
+    orbiters.forEach((o, i) => {
+      const a = o.a + t * o.sp;
+      dummy.position.set(Math.cos(a) * o.r, o.y + Math.sin(t * 0.8 + i) * 1.5, Math.sin(a) * o.r);
+      dummy.rotation.set(t * o.spin, t * o.spin * 0.7, 0);
+      dummy.scale.setScalar(o.s);
+      dummy.updateMatrix();
+      orbitMesh.setMatrixAt(i, dummy.matrix);
+    });
+    orbitMesh.instanceMatrix.needsUpdate = true;
+
+    // tractor beam
+    storm.updateMatrixWorld(true);
+    mouthAnchor.getWorldPosition(mouthWorld);
+    beamFade += ((state.beam ? 1 : 0) - beamFade) * Math.min(1, dt * 4);
+    const len = mouthWorld.distanceTo(beamTarget);
+    dir.subVectors(beamTarget, mouthWorld).normalize();
+    const R = 8 * (0.6 + state.scale * 0.35);
+    for (const [m, rr] of [[beamOuter, R], [beamInner, R * 0.35]]) {
+      m.position.copy(mouthWorld);
+      m.quaternion.setFromUnitVectors(DOWN, dir);
+      m.scale.set(rr, len, rr);
+      m.material.uniforms.time.value = t;
+      m.material.uniforms.opacity.value = (m === beamInner ? 1.2 : 1) * beamFade;
+      m.visible = beamFade > 0.01;
+    }
+    groundGlow.intensity = 1.6 * beamFade;
+
+    liftMesh.visible = beamFade > 0.01;
+    lifted.forEach((b, i) => {
+      if (state.beam) {
+        b.t += dt * b.sp * (1 + roarK);
+        if (b.t >= 1) { b.t -= 1; state.absorbed++; }
+      }
+      const rad = R * (1 - b.t * 0.78) * b.r * 0.85;
+      const ang = b.a + b.t * 9;
+      tmp.copy(beamTarget).lerp(mouthWorld, b.t);
+      tmp.x += Math.cos(ang) * rad;
+      tmp.z += Math.sin(ang) * rad;
+      dummy.position.copy(tmp);
+      dummy.rotation.set(t * b.spin, t * b.spin * 1.3, 0);
+      dummy.scale.setScalar((1 - b.t * 0.6) * beamFade);
+      dummy.updateMatrix();
+      liftMesh.setMatrixAt(i, dummy.matrix);
+    });
+    liftMesh.instanceMatrix.needsUpdate = true;
+    absorbedOut.textContent = state.absorbed.toLocaleString();
+
+    // sky + lightning
+    clouds.rotation.y = t * 0.02;
+    if (!reduceMotion) {
+      if (t > nextFlash) { strike(); nextFlash = t + 3 + rnd() * 6; }
+      if (flashT > 0) {
+        flashT = Math.max(0, flashT - dt);
+        const k = (flashT / 0.4) * (0.6 + 0.4 * Math.sin(t * 90));
+        boltMat.opacity = k;
+        hemi.intensity = 0.8 + k * 1.4;
+        scene.background.copy(SKY).lerp(FLASH_SKY, k);
+      } else {
+        boltMat.opacity = 0;
+        hemi.intensity = 0.8;
+        scene.background.copy(SKY);
+      }
+    }
+
+    // camera
+    if (state.spin && t - lastInteract > 4) orbit.theta += dt * 0.06;
+    const sp = Math.sin(orbit.phi);
+    camera.position.set(
+      orbit.target.x + orbit.r * sp * Math.sin(orbit.theta),
+      Math.max(4, orbit.target.y + orbit.r * Math.cos(orbit.phi)),
+      orbit.target.z + orbit.r * sp * Math.cos(orbit.theta));
+    if (roarK > 0 && !reduceMotion) camera.position.addScalar(Math.sin(t * 70) * 0.35 * roarK);
+    camera.lookAt(orbit.target);
+
+    renderer.render(scene, camera);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
